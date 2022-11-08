@@ -96,7 +96,6 @@ class Company(NestedSet):
 			["Stock Received But Not Billed Account", "stock_received_but_not_billed"],
 			["Stock Adjustment Account", "stock_adjustment_account"],
 			["Expense Included In Valuation Account", "expenses_included_in_valuation"],
-			["Default Payroll Payable Account", "default_payroll_payable_account"],
 		]
 
 		for account in accounts:
@@ -390,6 +389,7 @@ class Company(NestedSet):
 			"capital_work_in_progress_account": "Capital Work in Progress",
 			"asset_received_but_not_billed": "Asset Received But Not Billed",
 			"expenses_included_in_asset_valuation": "Expenses Included In Asset Valuation",
+			"default_expense_account": "Cost of Goods Sold",
 		}
 
 		if self.enable_perpetual_inventory:
@@ -399,7 +399,6 @@ class Company(NestedSet):
 					"default_inventory_account": "Stock",
 					"stock_adjustment_account": "Stock Adjustment",
 					"expenses_included_in_valuation": "Expenses Included In Valuation",
-					"default_expense_account": "Cost of Goods Sold",
 				}
 			)
 
@@ -421,20 +420,6 @@ class Company(NestedSet):
 
 		if not self.default_payable_account:
 			self.db_set("default_payable_account", self.default_payable_account)
-
-		if not self.default_payroll_payable_account:
-			payroll_payable_account = frappe.db.get_value(
-				"Account", {"account_name": _("Payroll Payable"), "company": self.name, "is_group": 0}
-			)
-
-			self.db_set("default_payroll_payable_account", payroll_payable_account)
-
-		if not self.default_employee_advance_account:
-			employe_advance_account = frappe.db.get_value(
-				"Account", {"account_name": _("Employee Advances"), "company": self.name, "is_group": 0}
-			)
-
-			self.db_set("default_employee_advance_account", employe_advance_account)
 
 		if not self.write_off_account:
 			write_off_acct = frappe.db.get_value(

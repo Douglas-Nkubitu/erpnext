@@ -128,6 +128,12 @@ def distribute_gl_based_on_cost_center_allocation(gl_map, precision=None):
 	new_gl_map = []
 	for d in gl_map:
 		cost_center = d.get("cost_center")
+
+		# Validate budget against main cost center
+		validate_expense_against_budget(
+			d, expense_amount=flt(d.debit, precision) - flt(d.credit, precision)
+		)
+
 		if cost_center and cost_center_allocation.get(cost_center):
 			for sub_cost_center, percentage in cost_center_allocation.get(cost_center, {}).items():
 				gle = copy.deepcopy(d)
@@ -168,6 +174,7 @@ def get_cost_center_allocation_data(company, posting_date):
 def merge_similar_entries(gl_map, precision=None):
 	merged_gl_map = []
 	accounting_dimensions = get_accounting_dimensions()
+
 	for entry in gl_map:
 		# if there is already an entry in this account then just add it
 		# to that entry
@@ -298,9 +305,10 @@ def make_entry(args, adv_adj, update_outstanding, from_repost=False):
 	gle.flags.from_repost = from_repost
 	gle.flags.adv_adj = adv_adj
 	gle.flags.update_outstanding = update_outstanding or "Yes"
+	gle.flags.notify_update = False
 	gle.submit()
 
-	if not from_repost:
+	if not from_repost and gle.voucher_type != "Period Closing Voucher":
 		validate_expense_against_budget(args)
 
 
@@ -487,7 +495,6 @@ def make_reverse_gl_entries(
 		).run(as_dict=1)
 
 	if gl_entries:
-		create_payment_ledger_entry(gl_entries, cancel=1)
 		create_payment_ledger_entry(
 			gl_entries, cancel=1, adv_adj=adv_adj, update_outstanding=update_outstanding
 		)

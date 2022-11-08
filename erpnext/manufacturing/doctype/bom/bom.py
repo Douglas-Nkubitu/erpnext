@@ -189,8 +189,8 @@ class BOM(WebsiteGenerator):
 		self.validate_transfer_against()
 		self.set_routing_operations()
 		self.validate_operations()
-		self.update_exploded_items(save=False)
 		self.calculate_cost()
+		self.update_exploded_items(save=False)
 		self.update_stock_qty()
 		self.update_cost(update_parent=False, from_child_bom=True, update_hour_rate=False, save=False)
 		self.validate_scrap_items()
@@ -385,6 +385,7 @@ class BOM(WebsiteGenerator):
 		if self.docstatus == 2:
 			return
 
+		self.flags.cost_updated = False
 		existing_bom_cost = self.total_cost
 
 		if self.docstatus == 1:
@@ -407,7 +408,11 @@ class BOM(WebsiteGenerator):
 				frappe.get_doc("BOM", bom).update_cost(from_child_bom=True)
 
 		if not from_child_bom:
-			frappe.msgprint(_("Cost Updated"), alert=True)
+			msg = "Cost Updated"
+			if not self.flags.cost_updated:
+				msg = "No changes in cost found"
+
+			frappe.msgprint(_(msg), alert=True)
 
 	def update_parent_cost(self):
 		if self.total_cost:
@@ -593,10 +598,15 @@ class BOM(WebsiteGenerator):
 			# not via doc event, table is not regenerated and needs updation
 			self.calculate_exploded_cost()
 
+		old_cost = self.total_cost
+
 		self.total_cost = self.operating_cost + self.raw_material_cost - self.scrap_material_cost
 		self.base_total_cost = (
 			self.base_operating_cost + self.base_raw_material_cost - self.base_scrap_material_cost
 		)
+
+		if self.total_cost != old_cost:
+			self.flags.cost_updated = True
 
 	def calculate_op_cost(self, update_hour_rate=False):
 		"""Update workstation rate and calculates totals"""
@@ -1019,7 +1029,6 @@ def get_bom_items_as_dict(
 			where
 				bom_item.docstatus < 2
 				and bom.name = %(bom)s
-				and ifnull(item.has_variants, 0) = 0
 				and item.is_stock_item in (1, {is_stock_item})
 				{where_conditions}
 				group by item_code, stock_uom

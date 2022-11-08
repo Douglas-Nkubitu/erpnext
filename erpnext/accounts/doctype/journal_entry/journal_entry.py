@@ -24,7 +24,6 @@ from erpnext.accounts.utils import (
 	get_stock_and_account_balance,
 )
 from erpnext.controllers.accounts_controller import AccountsController
-from erpnext.hr.doctype.expense_claim.expense_claim import update_reimbursed_amount
 
 
 class StockAccountInvalidTransaction(frappe.ValidationError):
@@ -66,7 +65,6 @@ class JournalEntry(AccountsController):
 			self.set_against_account()
 		self.create_remarks()
 		self.set_print_format_fields()
-		self.validate_expense_claim()
 		self.validate_credit_debit_note()
 		self.validate_empty_accounts_table()
 		self.set_account_and_party_balance()
@@ -83,27 +81,21 @@ class JournalEntry(AccountsController):
 		self.check_credit_limit()
 		self.make_gl_entries()
 		self.update_advance_paid()
-		self.update_expense_claim()
 		self.update_inter_company_jv()
 		self.update_invoice_discounting()
-		self.update_status_for_full_and_final_statement()
 
 	def on_cancel(self):
 		from erpnext.accounts.utils import unlink_ref_doc_from_payment_entries
-		from erpnext.payroll.doctype.salary_slip.salary_slip import unlink_ref_doc_from_salary_slip
 
 		unlink_ref_doc_from_payment_entries(self)
-		unlink_ref_doc_from_salary_slip(self.name)
 		self.ignore_linked_doctypes = ("GL Entry", "Stock Ledger Entry", "Payment Ledger Entry")
 		self.make_gl_entries(1)
 		self.update_advance_paid()
-		self.update_expense_claim()
 		self.unlink_advance_entry_reference()
 		self.unlink_asset_reference()
 		self.unlink_inter_company_jv()
 		self.unlink_asset_adjustment_entry()
 		self.update_invoice_discounting()
-		self.update_status_for_full_and_final_statement()
 
 	def get_title(self):
 		return self.pay_to_recd_from or self.accounts[0].account
@@ -112,20 +104,12 @@ class JournalEntry(AccountsController):
 		advance_paid = frappe._dict()
 		for d in self.get("accounts"):
 			if d.is_advance:
-				if d.reference_type in ("Sales Order", "Purchase Order", "Employee Advance"):
+				if d.reference_type in frappe.get_hooks("advance_payment_doctypes"):
 					advance_paid.setdefault(d.reference_type, []).append(d.reference_name)
 
 		for voucher_type, order_list in advance_paid.items():
 			for voucher_no in list(set(order_list)):
 				frappe.get_doc(voucher_type, voucher_no).set_total_advance_paid()
-
-	def update_status_for_full_and_final_statement(self):
-		for entry in self.accounts:
-			if entry.reference_type == "Full and Final Statement":
-				if self.docstatus == 1:
-					frappe.db.set_value("Full and Final Statement", entry.reference_name, "status", "Paid")
-				elif self.docstatus == 2:
-					frappe.db.set_value("Full and Final Statement", entry.reference_name, "status", "Unpaid")
 
 	def validate_inter_company_accounts(self):
 		if (
@@ -200,7 +184,9 @@ class JournalEntry(AccountsController):
 			}
 		)
 
-		tax_withholding_details = get_party_tax_withholding_details(inv, self.tax_withholding_category)
+		tax_withholding_details, advance_taxes, voucher_wise_amount = get_party_tax_withholding_details(
+			inv, self.tax_withholding_category
+		)
 
 		if not tax_withholding_details:
 			return
@@ -935,29 +921,6 @@ class JournalEntry(AccountsController):
 				as_dict=True,
 			)
 
-	def update_expense_claim(self):
-		for d in self.accounts:
-			if d.reference_type == "Expense Claim" and d.reference_name:
-				doc = frappe.get_doc("Expense Claim", d.reference_name)
-				if self.docstatus == 2:
-					update_reimbursed_amount(doc, -1 * d.debit)
-				else:
-					update_reimbursed_amount(doc, d.debit)
-
-	def validate_expense_claim(self):
-		for d in self.accounts:
-			if d.reference_type == "Expense Claim":
-				sanctioned_amount, reimbursed_amount = frappe.db.get_value(
-					"Expense Claim", d.reference_name, ("total_sanctioned_amount", "total_amount_reimbursed")
-				)
-				pending_amount = flt(sanctioned_amount) - flt(reimbursed_amount)
-				if d.debit > pending_amount:
-					frappe.throw(
-						_(
-							"Row No {0}: Amount cannot be greater than Pending Amount against Expense Claim {1}. Pending Amount is {2}"
-						).format(d.idx, d.reference_name, pending_amount)
-					)
-
 	def validate_credit_debit_note(self):
 		if self.stock_entry:
 			if frappe.db.get_value("Stock Entry", self.stock_entry, "docstatus") != 1:
@@ -1247,6 +1210,7 @@ def get_outstanding(args):
 		args = json.loads(args)
 
 	company_currency = erpnext.get_company_currency(args.get("company"))
+	due_date = None
 
 	if args.get("doctype") == "Journal Entry":
 		condition = " and party=%(party)s" if args.get("party") else ""
@@ -1271,9 +1235,11 @@ def get_outstanding(args):
 		invoice = frappe.db.get_value(
 			args["doctype"],
 			args["docname"],
-			["outstanding_amount", "conversion_rate", scrub(party_type)],
+			["outstanding_amount", "conversion_rate", scrub(party_type), "due_date"],
 			as_dict=1,
 		)
+
+		due_date = invoice.get("due_date")
 
 		exchange_rate = (
 			invoice.conversion_rate if (args.get("account_currency") != company_currency) else 1
@@ -1297,6 +1263,7 @@ def get_outstanding(args):
 			"exchange_rate": exchange_rate,
 			"party_type": party_type,
 			"party": invoice.get(scrub(party_type)),
+			"reference_due_date": due_date,
 		}
 
 

@@ -14,6 +14,7 @@ from erpnext.accounts.utils import (
 	QueryPaymentLedger,
 	get_outstanding_invoices,
 	reconcile_against_document,
+	update_reference_in_payment_entry,
 )
 from erpnext.controllers.accounts_controller import get_advance_payment_entries
 
@@ -22,6 +23,7 @@ class PaymentReconciliation(Document):
 	def __init__(self, *args, **kwargs):
 		super(PaymentReconciliation, self).__init__(*args, **kwargs)
 		self.common_filter_conditions = []
+		self.ple_posting_date_filter = []
 
 	@frappe.whitelist()
 	def get_unreconciled_entries(self):
@@ -150,6 +152,7 @@ class PaymentReconciliation(Document):
 			return_outstanding = ple_query.get_voucher_outstandings(
 				vouchers=return_invoices,
 				common_filter=self.common_filter_conditions,
+				posting_date=self.ple_posting_date_filter,
 				min_outstanding=-(self.minimum_payment_amount) if self.minimum_payment_amount else None,
 				max_outstanding=-(self.maximum_payment_amount) if self.maximum_payment_amount else None,
 				get_payments=True,
@@ -187,6 +190,7 @@ class PaymentReconciliation(Document):
 			self.party,
 			self.receivable_payable_account,
 			common_filter=self.common_filter_conditions,
+			posting_date=self.ple_posting_date_filter,
 			min_outstanding=self.minimum_invoice_amount if self.minimum_invoice_amount else None,
 			max_outstanding=self.maximum_invoice_amount if self.maximum_invoice_amount else None,
 		)
@@ -209,6 +213,23 @@ class PaymentReconciliation(Document):
 			inv.currency = entry.get("currency")
 			inv.outstanding_amount = flt(entry.get("outstanding_amount"))
 
+	def get_difference_amount(self, allocated_entry):
+		if allocated_entry.get("reference_type") != "Payment Entry":
+			return
+
+		dr_or_cr = (
+			"credit_in_account_currency"
+			if erpnext.get_party_account_type(self.party_type) == "Receivable"
+			else "debit_in_account_currency"
+		)
+
+		row = self.get_payment_details(allocated_entry, dr_or_cr)
+
+		doc = frappe.get_doc(allocated_entry.reference_type, allocated_entry.reference_name)
+		update_reference_in_payment_entry(row, doc, do_not_save=True)
+
+		return doc.difference_amount
+
 	@frappe.whitelist()
 	def allocate_entries(self, args):
 		self.validate_entries()
@@ -224,12 +245,16 @@ class PaymentReconciliation(Document):
 					res = self.get_allocated_entry(pay, inv, pay["amount"])
 					inv["outstanding_amount"] = flt(inv.get("outstanding_amount")) - flt(pay.get("amount"))
 					pay["amount"] = 0
+
+				res.difference_amount = self.get_difference_amount(res)
+
 				if pay.get("amount") == 0:
 					entries.append(res)
 					break
 				elif inv.get("outstanding_amount") == 0:
 					entries.append(res)
 					continue
+
 			else:
 				break
 
@@ -350,6 +375,7 @@ class PaymentReconciliation(Document):
 
 	def build_qb_filter_conditions(self, get_invoices=False, get_return_invoices=False):
 		self.common_filter_conditions.clear()
+		self.ple_posting_date_filter.clear()
 		ple = qb.DocType("Payment Ledger Entry")
 
 		self.common_filter_conditions.append(ple.company == self.company)
@@ -359,15 +385,15 @@ class PaymentReconciliation(Document):
 
 		if get_invoices:
 			if self.from_invoice_date:
-				self.common_filter_conditions.append(ple.posting_date.gte(self.from_invoice_date))
+				self.ple_posting_date_filter.append(ple.posting_date.gte(self.from_invoice_date))
 			if self.to_invoice_date:
-				self.common_filter_conditions.append(ple.posting_date.lte(self.to_invoice_date))
+				self.ple_posting_date_filter.append(ple.posting_date.lte(self.to_invoice_date))
 
 		elif get_return_invoices:
 			if self.from_payment_date:
-				self.common_filter_conditions.append(ple.posting_date.gte(self.from_payment_date))
+				self.ple_posting_date_filter.append(ple.posting_date.gte(self.from_payment_date))
 			if self.to_payment_date:
-				self.common_filter_conditions.append(ple.posting_date.lte(self.to_payment_date))
+				self.ple_posting_date_filter.append(ple.posting_date.lte(self.to_payment_date))
 
 	def get_conditions(self, get_payments=False):
 		condition = " and company = '{0}' ".format(self.company)

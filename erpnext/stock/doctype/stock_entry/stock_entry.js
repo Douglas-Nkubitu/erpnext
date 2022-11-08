@@ -174,6 +174,8 @@ frappe.ui.form.on('Stock Entry', {
 					if(!items.length) {
 						items = frm.doc.items;
 					}
+
+					mr.work_order = frm.doc.work_order;
 					items.forEach(function(item) {
 						var mr_item = frappe.model.add_child(mr, 'items');
 						mr_item.item_code = item.item_code;
@@ -583,18 +585,23 @@ frappe.ui.form.on('Stock Entry', {
 	},
 
 	add_to_transit: function(frm) {
-		if(frm.doc.add_to_transit && frm.doc.purpose=='Material Transfer') {
-			frm.set_value('to_warehouse', '');
+		if(frm.doc.purpose=='Material Transfer') {
+			var filters = {
+				'is_group': 0,
+				'company': frm.doc.company
+			}
+
+			if(frm.doc.add_to_transit){
+				filters['warehouse_type'] = 'Transit';
+				frm.set_value('to_warehouse', '');
+				frm.trigger('set_transit_warehouse');
+			}
+
 			frm.fields_dict.to_warehouse.get_query = function() {
 				return {
-					filters:{
-						'warehouse_type' : 'Transit',
-						'is_group': 0,
-						'company': frm.doc.company
-					}
+					filters:filters
 				};
 			};
-			frm.trigger('set_transit_warehouse');
 		}
 	},
 
@@ -618,6 +625,12 @@ frappe.ui.form.on('Stock Entry', {
 	purchase_order: (frm) => {
 		if (frm.doc.purchase_order) {
 			frm.set_value("subcontracting_order", "");
+			erpnext.utils.map_current_doc({
+				method: 'erpnext.stock.doctype.stock_entry.stock_entry.get_items_from_subcontract_order',
+				source_name: frm.doc.purchase_order,
+				target_doc: frm,
+				freeze: true,
+			});
 		}
 	},
 
@@ -625,7 +638,7 @@ frappe.ui.form.on('Stock Entry', {
 		if (frm.doc.subcontracting_order) {
 			frm.set_value("purchase_order", "");
 			erpnext.utils.map_current_doc({
-				method: 'erpnext.stock.doctype.stock_entry.stock_entry.get_items_from_subcontracting_order',
+				method: 'erpnext.stock.doctype.stock_entry.stock_entry.get_items_from_subcontract_order',
 				source_name: frm.doc.subcontracting_order,
 				target_doc: frm,
 				freeze: true,
@@ -808,7 +821,8 @@ erpnext.stock.StockEntry = class StockEntry extends erpnext.stock.StockControlle
 			return {
 				"filters": {
 					"docstatus": 1,
-					"company": me.frm.doc.company
+					"company": me.frm.doc.company,
+					"status": ["not in", ["Completed", "Closed"]]
 				}
 			};
 		});

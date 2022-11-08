@@ -119,6 +119,7 @@ class ReceivablePayableReport(object):
 					party_account=ple.account,
 					posting_date=ple.posting_date,
 					account_currency=ple.account_currency,
+					remarks=ple.remarks,
 					invoiced=0.0,
 					paid=0.0,
 					credit_note=0.0,
@@ -164,6 +165,8 @@ class ReceivablePayableReport(object):
 			"range3",
 			"range4",
 			"range5",
+			"future_amount",
+			"remaining_balance",
 		]
 
 	def get_voucher_balance(self, ple):
@@ -176,6 +179,11 @@ class ReceivablePayableReport(object):
 
 		key = (ple.against_voucher_type, ple.against_voucher_no, ple.party)
 		row = self.voucher_balance.get(key)
+
+		if not row:
+			# no invoice, this is an invoice / stand-alone payment / credit note
+			row = self.voucher_balance.get((ple.voucher_type, ple.voucher_no, ple.party))
+
 		return row
 
 	def update_voucher_balance(self, ple):
@@ -185,7 +193,11 @@ class ReceivablePayableReport(object):
 		if not row:
 			return
 
-		amount = ple.amount
+		# amount in "Party Currency", if its supplied. If not, amount in company currency
+		if self.filters.get(scrub(self.party_type)):
+			amount = ple.amount_in_account_currency
+		else:
+			amount = ple.amount
 		amount_in_account_currency = ple.amount_in_account_currency
 
 		# update voucher
@@ -545,7 +557,7 @@ class ReceivablePayableReport(object):
 				jea.party,
 				jea.party_type,
 				je.posting_date as future_date,
-				sum({0}) as future_amount,
+				sum('{0}') as future_amount,
 				je.cheque_no as future_ref
 			from
 				`tabJournal Entry` as je inner join `tabJournal Entry Account` as jea
@@ -683,9 +695,10 @@ class ReceivablePayableReport(object):
 				ple.party,
 				ple.posting_date,
 				ple.due_date,
-				ple.account_currency.as_("currency"),
+				ple.account_currency,
 				ple.amount,
 				ple.amount_in_account_currency,
+				ple.remarks,
 			)
 			.where(ple.delinked == 0)
 			.where(Criterion.all(self.qb_selection_filter))
@@ -720,6 +733,7 @@ class ReceivablePayableReport(object):
 	def prepare_conditions(self):
 		self.qb_selection_filter = []
 		party_type_field = scrub(self.party_type)
+		self.qb_selection_filter.append(self.ple.party_type == self.party_type)
 
 		self.add_common_filters(party_type_field=party_type_field)
 
@@ -734,7 +748,7 @@ class ReceivablePayableReport(object):
 
 		self.add_accounting_dimensions_filters()
 
-	def get_cost_center_conditions(self, conditions):
+	def get_cost_center_conditions(self):
 		lft, rgt = frappe.db.get_value("Cost Center", self.filters.cost_center, ["lft", "rgt"])
 		cost_center_list = [
 			center.name
@@ -770,7 +784,7 @@ class ReceivablePayableReport(object):
 	def add_customer_filters(
 		self,
 	):
-		self.customter = qb.DocType("Customer")
+		self.customer = qb.DocType("Customer")
 
 		if self.filters.get("customer_group"):
 			self.get_hierarchical_filters("Customer Group", "customer_group")
@@ -824,7 +838,7 @@ class ReceivablePayableReport(object):
 		customer = self.customer
 		groups = qb.from_(doc).select(doc.name).where((doc.lft >= lft) & (doc.rgt <= rgt))
 		customers = qb.from_(customer).select(customer.name).where(customer[key].isin(groups))
-		self.qb_selection_filter.append(ple.isin(ple.party.isin(customers)))
+		self.qb_selection_filter.append(ple.party.isin(customers))
 
 	def add_accounting_dimensions_filters(self):
 		accounting_dimensions = get_accounting_dimensions(as_list=False)
@@ -963,6 +977,9 @@ class ReceivablePayableReport(object):
 				options="Supplier Group",
 			)
 
+		if self.filters.show_remarks:
+			self.add_column(label=_("Remarks"), fieldname="remarks", fieldtype="Text", width=200),
+
 	def add_column(self, label, fieldname=None, fieldtype="Currency", options=None, width=120):
 		if not fieldname:
 			fieldname = scrub(label)
@@ -992,7 +1009,7 @@ class ReceivablePayableReport(object):
 				"{range3}-{range4}".format(
 					range3=cint(self.filters["range3"]) + 1, range4=self.filters["range4"]
 				),
-				"{range4}-{above}".format(range4=cint(self.filters["range4"]) + 1, above=_("Above")),
+				_("{range4}-Above").format(range4=cint(self.filters["range4"]) + 1),
 			]
 		):
 			self.add_column(label=label, fieldname="range" + str(i + 1))
