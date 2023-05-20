@@ -4,7 +4,18 @@
 
 import frappe
 from frappe import _
-from frappe.utils import add_months, cint, flt, get_link_to_form, getdate, nowdate, today
+from frappe.utils import (
+	add_months,
+	cint,
+	flt,
+	get_last_day,
+	get_link_to_form,
+	getdate,
+	is_last_day_of_the_month,
+	nowdate,
+	today,
+)
+from frappe.utils.user import get_users_with_role
 
 from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import (
 	get_checks_for_pl_and_bs_accounts,
@@ -18,7 +29,7 @@ from erpnext.assets.doctype.asset_depreciation_schedule.asset_depreciation_sched
 )
 
 
-def post_depreciation_entries(date=None, commit=True):
+def post_depreciation_entries(date=None):
 	# Return if automatic booking of asset depreciation is disabled
 	if not cint(
 		frappe.db.get_value("Accounts Settings", None, "book_asset_depreciation_entry_automatically")
@@ -27,13 +38,24 @@ def post_depreciation_entries(date=None, commit=True):
 
 	if not date:
 		date = today()
+
+	failed_asset_names = []
+
 	for asset_name in get_depreciable_assets(date):
 		asset_doc = frappe.get_doc("Asset", asset_name)
 
-		make_depreciation_entry_for_all_asset_depr_schedules(asset_doc, date)
-
-		if commit:
+		try:
+			make_depreciation_entry_for_all_asset_depr_schedules(asset_doc, date)
 			frappe.db.commit()
+		except Exception as e:
+			frappe.db.rollback()
+			failed_asset_names.append(asset_name)
+
+	if failed_asset_names:
+		set_depr_entry_posting_status_for_failed_assets(failed_asset_names)
+		notify_depr_entry_posting_error(failed_asset_names)
+
+	frappe.db.commit()
 
 
 def get_depreciable_assets(date):
@@ -135,6 +157,7 @@ def make_depreciation_entry(asset_depr_schedule_name, date=None):
 			je.append("accounts", debit_entry)
 
 			je.flags.ignore_permissions = True
+			je.flags.planned_depr_entry = True
 			je.save()
 			if not je.meta.get_workflow():
 				je.submit()
@@ -145,6 +168,8 @@ def make_depreciation_entry(asset_depr_schedule_name, date=None):
 			row = asset.get("finance_books")[idx - 1]
 			row.value_after_depreciation -= d.depreciation_amount
 			row.db_update()
+
+	asset.db_set("depr_entry_posting_status", "Successful")
 
 	asset.set_status()
 
@@ -207,6 +232,48 @@ def get_credit_and_debit_accounts(accumulated_depreciation_account, depreciation
 		frappe.throw(_("Depreciation Expense Account should be an Income or Expense Account."))
 
 	return credit_account, debit_account
+
+
+def set_depr_entry_posting_status_for_failed_assets(failed_asset_names):
+	for asset_name in failed_asset_names:
+		frappe.db.set_value("Asset", asset_name, "depr_entry_posting_status", "Failed")
+
+
+def notify_depr_entry_posting_error(failed_asset_names):
+	recipients = get_users_with_role("Accounts Manager")
+
+	if not recipients:
+		recipients = get_users_with_role("System Manager")
+
+	subject = _("Error while posting depreciation entries")
+
+	asset_links = get_comma_separated_asset_links(failed_asset_names)
+
+	message = (
+		_("Hello,")
+		+ "<br><br>"
+		+ _("The following assets have failed to automatically post depreciation entries: {0}").format(
+			asset_links
+		)
+		+ "."
+		+ "<br><br>"
+		+ _(
+			"Please raise a support ticket and share this email, or forward this email to your development team so that they can find the issue in the developer console by manually creating the depreciation entry via the asset's depreciation schedule table."
+		)
+	)
+
+	frappe.sendmail(recipients=recipients, subject=subject, message=message)
+
+
+def get_comma_separated_asset_links(asset_names):
+	asset_links = []
+
+	for asset_name in asset_names:
+		asset_links.append(get_link_to_form("Asset", asset_name))
+
+	asset_links = ", ".join(asset_links)
+
+	return asset_links
 
 
 @frappe.whitelist()
@@ -295,12 +362,12 @@ def reset_depreciation_schedule(asset_doc, date, notes):
 		asset_doc, notes, date_of_return=date
 	)
 
-	modify_depreciation_schedule_for_asset_repairs(asset_doc)
+	modify_depreciation_schedule_for_asset_repairs(asset_doc, notes)
 
 	asset_doc.save()
 
 
-def modify_depreciation_schedule_for_asset_repairs(asset):
+def modify_depreciation_schedule_for_asset_repairs(asset, notes):
 	asset_repairs = frappe.get_all(
 		"Asset Repair", filters={"asset": asset.name}, fields=["name", "increase_in_asset_life"]
 	)
@@ -309,10 +376,6 @@ def modify_depreciation_schedule_for_asset_repairs(asset):
 		if repair.increase_in_asset_life:
 			asset_repair = frappe.get_doc("Asset Repair", repair.name)
 			asset_repair.modify_depreciation_schedule()
-			notes = _("This schedule was created when Asset {0} went through Asset Repair {1}.").format(
-				get_link_to_form(asset.doctype, asset.name),
-				get_link_to_form(asset_repair.doctype, asset_repair.name),
-			)
 			make_new_active_asset_depr_schedules_and_cancel_current_ones(asset, notes)
 
 
@@ -353,6 +416,9 @@ def disposal_was_made_on_original_schedule_date(schedule_idx, row, posting_date_
 	orginal_schedule_date = add_months(
 		row.depreciation_start_date, schedule_idx * cint(row.frequency_of_depreciation)
 	)
+
+	if is_last_day_of_the_month(row.depreciation_start_date):
+		orginal_schedule_date = get_last_day(orginal_schedule_date)
 
 	if orginal_schedule_date == posting_date_of_disposal:
 		return True
@@ -474,18 +540,8 @@ def get_asset_details(asset, finance_book=None):
 	disposal_account, depreciation_cost_center = get_disposal_account_and_cost_center(asset.company)
 	depreciation_cost_center = asset.cost_center or depreciation_cost_center
 
-	idx = 1
-	if finance_book:
-		for d in asset.finance_books:
-			if d.finance_book == finance_book:
-				idx = d.idx
-				break
+	value_after_depreciation = asset.get_value_after_depreciation(finance_book)
 
-	value_after_depreciation = (
-		asset.finance_books[idx - 1].value_after_depreciation
-		if asset.calculate_depreciation
-		else asset.value_after_depreciation
-	)
 	accumulated_depr_amount = flt(asset.gross_purchase_amount) - flt(value_after_depreciation)
 
 	return (

@@ -16,6 +16,7 @@ from frappe.utils import (
 	nowdate,
 )
 
+from erpnext.accounts.doctype.journal_entry.test_journal_entry import make_journal_entry
 from erpnext.accounts.doctype.purchase_invoice.test_purchase_invoice import make_purchase_invoice
 from erpnext.assets.doctype.asset.asset import (
 	make_sales_invoice,
@@ -28,9 +29,11 @@ from erpnext.assets.doctype.asset.depreciation import (
 	scrap_asset,
 )
 from erpnext.assets.doctype.asset_depreciation_schedule.asset_depreciation_schedule import (
-	clear_depr_schedule,
+	_check_is_pro_rata,
+	_get_pro_rata_amt,
 	get_asset_depr_schedule_doc,
 	get_depr_schedule,
+	get_depreciation_amount,
 )
 from erpnext.stock.doctype.purchase_receipt.purchase_receipt import (
 	make_purchase_invoice as make_invoice,
@@ -234,7 +237,7 @@ class TestAsset(AssetSetup):
 			asset.gross_purchase_amount - asset.finance_books[0].value_after_depreciation,
 			asset.precision("gross_purchase_amount"),
 		)
-		pro_rata_amount, _, _ = asset.get_pro_rata_amt(
+		pro_rata_amount, _, _ = _get_pro_rata_amt(
 			asset.finance_books[0], 9000, get_last_day(add_months(purchase_date, 1)), date
 		)
 		pro_rata_amount = flt(pro_rata_amount, asset.precision("gross_purchase_amount"))
@@ -321,7 +324,7 @@ class TestAsset(AssetSetup):
 		self.assertEquals(second_asset_depr_schedule.status, "Active")
 		self.assertEquals(first_asset_depr_schedule.status, "Cancelled")
 
-		pro_rata_amount, _, _ = asset.get_pro_rata_amt(
+		pro_rata_amount, _, _ = _get_pro_rata_amt(
 			asset.finance_books[0], 9000, get_last_day(add_months(purchase_date, 1)), date
 		)
 		pro_rata_amount = flt(pro_rata_amount, asset.precision("gross_purchase_amount"))
@@ -688,7 +691,7 @@ class TestDepreciationMethods(AssetSetup):
 		)
 
 		self.assertEqual(asset.status, "Draft")
-		expected_schedules = [["2032-12-31", 30000.0, 77095.89], ["2033-06-06", 12904.11, 90000.0]]
+		expected_schedules = [["2032-12-31", 42904.11, 90000.0]]
 		schedules = [
 			[cstr(d.schedule_date), flt(d.depreciation_amount, 2), d.accumulated_depreciation_amount]
 			for d in get_depr_schedule(asset.name, "Draft")
@@ -828,8 +831,8 @@ class TestDepreciationMethods(AssetSetup):
 		expected_schedules = [
 			["2030-12-31", 28630.14, 28630.14],
 			["2031-12-31", 35684.93, 64315.07],
-			["2032-12-31", 17842.47, 82157.54],
-			["2033-06-06", 5342.46, 87500.0],
+			["2032-12-31", 17842.46, 82157.53],
+			["2033-06-06", 5342.47, 87500.0],
 		]
 
 		schedules = [
@@ -857,12 +860,12 @@ class TestDepreciationMethods(AssetSetup):
 		)
 
 		expected_schedules = [
-			["2022-02-28", 647.25, 647.25],
-			["2022-03-31", 1210.71, 1857.96],
-			["2022-04-30", 1053.99, 2911.95],
-			["2022-05-31", 917.55, 3829.5],
-			["2022-06-30", 798.77, 4628.27],
-			["2022-07-15", 371.73, 5000.0],
+			["2022-02-28", 310.89, 310.89],
+			["2022-03-31", 654.45, 965.34],
+			["2022-04-30", 654.45, 1619.79],
+			["2022-05-31", 654.45, 2274.24],
+			["2022-06-30", 654.45, 2928.69],
+			["2022-07-15", 2071.31, 5000.0],
 		]
 
 		schedules = [
@@ -924,11 +927,6 @@ class TestDepreciationBasics(AssetSetup):
 
 	def test_get_depreciation_amount(self):
 		"""Tests if get_depreciation_amount() returns the right value."""
-
-		from erpnext.assets.doctype.asset_depreciation_schedule.asset_depreciation_schedule import (
-			get_depreciation_amount,
-		)
-
 		asset = create_asset(item_code="Macbook Pro", available_for_use_date="2019-12-31")
 
 		asset.calculate_depreciation = 1
@@ -1002,7 +1000,7 @@ class TestDepreciationBasics(AssetSetup):
 			},
 		)
 
-		has_pro_rata = asset.check_is_pro_rata(asset.finance_books[0])
+		has_pro_rata = _check_is_pro_rata(asset, asset.finance_books[0])
 		self.assertFalse(has_pro_rata)
 
 		asset.finance_books = []
@@ -1017,7 +1015,7 @@ class TestDepreciationBasics(AssetSetup):
 			},
 		)
 
-		has_pro_rata = asset.check_is_pro_rata(asset.finance_books[0])
+		has_pro_rata = _check_is_pro_rata(asset, asset.finance_books[0])
 		self.assertTrue(has_pro_rata)
 
 	def test_expected_value_after_useful_life_greater_than_purchase_amount(self):
@@ -1259,7 +1257,7 @@ class TestDepreciationBasics(AssetSetup):
 
 		asset_depr_schedule_doc = get_asset_depr_schedule_doc(asset.name, "Active")
 
-		clear_depr_schedule(asset_depr_schedule_doc)
+		asset_depr_schedule_doc.clear_depr_schedule()
 
 		self.assertEqual(len(asset_depr_schedule_doc.get("depreciation_schedule")), 1)
 
@@ -1308,19 +1306,19 @@ class TestDepreciationBasics(AssetSetup):
 		asset_depr_schedule_doc_1 = get_asset_depr_schedule_doc(
 			asset.name, "Active", "Test Finance Book 1"
 		)
-		clear_depr_schedule(asset_depr_schedule_doc_1)
+		asset_depr_schedule_doc_1.clear_depr_schedule()
 		self.assertEqual(len(asset_depr_schedule_doc_1.get("depreciation_schedule")), 3)
 
 		asset_depr_schedule_doc_2 = get_asset_depr_schedule_doc(
 			asset.name, "Active", "Test Finance Book 2"
 		)
-		clear_depr_schedule(asset_depr_schedule_doc_2)
+		asset_depr_schedule_doc_2.clear_depr_schedule()
 		self.assertEqual(len(asset_depr_schedule_doc_2.get("depreciation_schedule")), 3)
 
 		asset_depr_schedule_doc_3 = get_asset_depr_schedule_doc(
 			asset.name, "Active", "Test Finance Book 3"
 		)
-		clear_depr_schedule(asset_depr_schedule_doc_3)
+		asset_depr_schedule_doc_3.clear_depr_schedule()
 		self.assertEqual(len(asset_depr_schedule_doc_3.get("depreciation_schedule")), 0)
 
 	def test_depreciation_schedules_are_set_up_for_multiple_finance_books(self):
@@ -1503,6 +1501,92 @@ class TestDepreciationBasics(AssetSetup):
 		for i, schedule in enumerate(get_depr_schedule(asset.name, "Active")):
 			self.assertEqual(getdate(expected_dates[i]), getdate(schedule.schedule_date))
 
+	def test_manual_depreciation_for_existing_asset(self):
+		asset = create_asset(
+			item_code="Macbook Pro",
+			is_existing_asset=1,
+			purchase_date="2020-01-30",
+			available_for_use_date="2020-01-30",
+			submit=1,
+		)
+
+		self.assertEqual(asset.status, "Submitted")
+		self.assertEqual(asset.get_value_after_depreciation(), 100000)
+
+		jv = make_journal_entry(
+			"_Test Depreciations - _TC", "_Test Accumulated Depreciations - _TC", 100, save=False
+		)
+		for d in jv.accounts:
+			d.reference_type = "Asset"
+			d.reference_name = asset.name
+		jv.voucher_type = "Depreciation Entry"
+		jv.insert()
+		jv.submit()
+
+		asset.reload()
+		self.assertEqual(asset.get_value_after_depreciation(), 99900)
+
+		jv.cancel()
+
+		asset.reload()
+		self.assertEqual(asset.get_value_after_depreciation(), 100000)
+
+	def test_manual_depreciation_for_depreciable_asset(self):
+		asset = create_asset(
+			item_code="Macbook Pro",
+			calculate_depreciation=1,
+			purchase_date="2020-01-30",
+			available_for_use_date="2020-01-30",
+			expected_value_after_useful_life=10000,
+			total_number_of_depreciations=10,
+			frequency_of_depreciation=1,
+			submit=1,
+		)
+
+		self.assertEqual(asset.status, "Submitted")
+		self.assertEqual(asset.get_value_after_depreciation(), 100000)
+
+		jv = make_journal_entry(
+			"_Test Depreciations - _TC", "_Test Accumulated Depreciations - _TC", 100, save=False
+		)
+		for d in jv.accounts:
+			d.reference_type = "Asset"
+			d.reference_name = asset.name
+		jv.voucher_type = "Depreciation Entry"
+		jv.insert()
+		jv.submit()
+
+		asset.reload()
+		self.assertEqual(asset.get_value_after_depreciation(), 99900)
+
+		jv.cancel()
+
+		asset.reload()
+		self.assertEqual(asset.get_value_after_depreciation(), 100000)
+
+	def test_manual_depreciation_with_incorrect_jv_voucher_type(self):
+		asset = create_asset(
+			item_code="Macbook Pro",
+			calculate_depreciation=1,
+			purchase_date="2020-01-30",
+			available_for_use_date="2020-01-30",
+			expected_value_after_useful_life=10000,
+			total_number_of_depreciations=10,
+			frequency_of_depreciation=1,
+			submit=1,
+		)
+
+		jv = make_journal_entry(
+			"_Test Depreciations - _TC", "_Test Accumulated Depreciations - _TC", 100, save=False
+		)
+		for d in jv.accounts:
+			d.reference_type = "Asset"
+			d.reference_name = asset.name
+			d.account_type = "Depreciation"
+		jv.voucher_type = "Journal Entry"
+
+		self.assertRaises(frappe.ValidationError, jv.insert)
+
 
 def create_asset_data():
 	if not frappe.db.exists("Asset Category", "Computers"):
@@ -1549,6 +1633,7 @@ def create_asset(**args):
 			"asset_owner": args.asset_owner or "Company",
 			"is_existing_asset": args.is_existing_asset or 1,
 			"asset_quantity": args.get("asset_quantity") or 1,
+			"depr_entry_posting_status": args.depr_entry_posting_status or "",
 		}
 	)
 

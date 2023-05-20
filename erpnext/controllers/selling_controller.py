@@ -22,7 +22,7 @@ class SellingController(StockController):
 	def onload(self):
 		super(SellingController, self).onload()
 		if self.doctype in ("Sales Order", "Delivery Note", "Sales Invoice"):
-			for item in self.get("items"):
+			for item in self.get("items") + (self.get("packed_items") or []):
 				item.update(get_bin_details(item.item_code, item.warehouse, include_child_warehouses=True))
 
 	def validate(self):
@@ -136,7 +136,7 @@ class SellingController(StockController):
 			self.in_words = money_in_words(amount, self.currency)
 
 	def calculate_commission(self):
-		if not self.meta.get_field("commission_rate"):
+		if not self.meta.get_field("commission_rate") or self.docstatus.is_submitted():
 			return
 
 		self.round_floats_in(self, ("amount_eligible_for_commission", "commission_rate"))
@@ -168,7 +168,7 @@ class SellingController(StockController):
 			self.round_floats_in(sales_person)
 
 			sales_person.allocated_amount = flt(
-				self.amount_eligible_for_commission * sales_person.allocated_percentage / 100.0,
+				flt(self.amount_eligible_for_commission) * sales_person.allocated_percentage / 100.0,
 				self.precision("allocated_amount", sales_person),
 			)
 
